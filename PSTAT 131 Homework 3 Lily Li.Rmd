@@ -1,0 +1,209 @@
+---
+title: 'PSTAT 131: Homework 3'
+author: "Lily Li"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, message=FALSE}
+library(tidytext)
+library(dplyr)
+library(tidymodels)
+library(readr)
+library(ggpubr)
+library(corrplot)
+library(discrim)
+library(klaR)
+tidymodels_prefer()
+titanic_info <- read.csv("~/Downloads/homework-3/data/titanic.csv") %>%
+  mutate(survived=factor(survived, levels=c("Yes","No")), pclass=factor(pclass))
+```
+### Q1 Stratified sampling for training and testing data sets
+```{r}
+set.seed(9)
+titanic_split <- initial_split(titanic_info, prop = 0.80,
+                                strata = survived)
+titanic_train <- training(titanic_split)
+titanic_test <- testing(titanic_split)
+```
+
+There are missing values for variables age and cabin (cabin information is more likely to be missing if from 2nd or 3rd class). It is crucial to use stratified sampling for this demographic data since the distribution of survived is unbalanced (more subjects did not survive). This sampling method helps reduce bias in selection and best represent each factor level to evaluate differences in groups.
+
+### Q2. Exploratory analysis
+```{r}
+pclass_stack <- titanic_train %>% 
+  ggplot(aes(x = survived, fill = pclass)) +
+  geom_bar(position="stack") +
+  ggtitle("Count of Survived by Pclass")
+
+sex_stack <- titanic_train %>% 
+  ggplot(aes(x = survived, fill = sex)) +
+  geom_bar(position="stack") +
+  ggtitle("Count of Survived by Sex")
+
+fare_boxplot <- titanic_train %>% 
+  ggplot(aes(x = survived, y = fare)) +
+  geom_boxplot() +
+  coord_flip() +
+  ggtitle("Distribution of Fare by Survived")
+
+age_boxplot <- na.omit(titanic_train) %>% 
+  ggplot(aes(x = survived, y = age)) +
+  geom_boxplot() +
+  coord_flip() +
+  ggtitle("Distribution of Age by Survived")
+
+ggarrange(pclass_stack, sex_stack, fare_boxplot, age_boxplot,
+          ncol = 2, nrow = 2)
+
+embarked_data <- titanic_train %>%
+  group_by(embarked, survived) %>%
+  tally() %>%
+  mutate(percent=n/sum(n))
+
+embarked_data %>% 
+  ggplot(aes(x = embarked, y = n, fill = survived)) +
+  geom_bar(stat="identity") +
+  geom_text(aes(label=paste0(sprintf("%1.1f", percent*100),"%")), position=position_stack(vjust=0.5)) + 
+  ylab("count") +
+  ggtitle("Survived by Sex")
+```
+
+Using visualizations to explore the distribution of $survived$, the distribution is unbalanced with more titanic passengers not survived. Of the subjects that did not survive, there is a higher proportion of them being men and being third class. Based on the spread and centers of age and fare, those that died on the titanic are older and used cheaper ticket fares. Of the survivors, most are female, had more expensive tickets, and younger. The pclass distribution amoung survivors is nearly evenly balanced. Another interesting insight is that more people departed from Southampton compared to Cherbourg and Queenstown; most passengers that departed from Southampton did not survive.
+
+### Q3. Correlation matrix 
+```{r, warning=FALSE}
+na.omit(titanic_train) %>% 
+  select(is.numeric) %>% 
+  cor() %>% 
+  corrplot(type = "lower", method = 'number')
+```
+
+There don't appear to be any strong associations between continuous variables, but there is a weak positive correlation between $fare$ and sib_sp (# of siblings / spouses) and between $fare$ and $parch$ (# of parents / children).
+
+### Q4. Create a recipe
+```{r, warning=FALSE}
+titanic_recipe <- recipe(survived ~ pclass + sex + age + sib_sp + parch + fare, data = titanic_train) %>%
+  step_impute_linear(age, impute_with = imp_vars(sib_sp)) %>%
+  step_dummy(all_nominal_predictors()) %>%
+  step_interact( ~ starts_with("sex"):fare + age:fare) # interactions between: sex and fare, age and fare
+# should use starts_with for dummy variables
+```
+### Q5. Logistic regression
+```{r, warning=FALSE}
+# create logistic regression model for classification
+log_reg <- logistic_reg() %>% 
+  set_engine("glm") %>% 
+  set_mode("classification")
+
+# create a workflow
+log_wkflow <- workflow() %>% 
+  add_model(log_reg) %>% 
+  add_recipe(titanic_recipe)
+
+# add workflow to training data
+log_fit <- fit(log_wkflow, titanic_train)
+```
+### Q6. Linear discriminant analysis
+```{r, warning=FALSE}
+# specify a linear discriminant analysis model 
+lda_mod <- discrim_linear() %>% 
+  set_mode("classification") %>% 
+  set_engine("MASS")
+
+# create a workflow
+lda_wkflow <- workflow() %>% 
+  add_model(lda_mod) %>% 
+  add_recipe(titanic_recipe)
+
+# add workflow to training data
+lda_fit <- fit(lda_wkflow, titanic_train)
+```
+### Q7. Quadratic discriminant analysis
+```{r, warning=FALSE}
+# specify a quadratic discriminant analysis model
+qda_mod <- discrim_quad() %>% 
+  set_mode("classification") %>% 
+  set_engine("MASS")
+
+# create a workflow
+qda_wkflow <- workflow() %>% 
+  add_model(qda_mod) %>% 
+  add_recipe(titanic_recipe)
+
+# add workflow to training data
+qda_fit <- fit(qda_wkflow, titanic_train)
+```
+### Q8. Naive Bayes model
+```{r, warning=FALSE}
+# specify a naive bayes analysis model
+nb_mod <- naive_Bayes() %>% 
+  set_mode("classification") %>% 
+  set_engine("klaR") %>% 
+  set_args(usekernel = FALSE) 
+
+# create a workflow
+nb_wkflow <- workflow() %>% 
+  add_model(nb_mod) %>% 
+  add_recipe(titanic_recipe)
+
+# add workflow to training data
+nb_fit <- fit(nb_wkflow, titanic_train)
+```
+### Q9. Evaluate 4 Models
+```{r, warning=FALSE}
+# Use predict() and bind_cols() to generate predictions using each of 4 models and training data
+log_ac <- predict(log_fit, new_data = titanic_train, type = "class") %>%
+  bind_cols(select(titanic_train, survived)) %>%
+  accuracy(truth = survived, estimate = .pred_class) %>% # accuracy metric
+  select(.estimate) %>%
+  unlist()
+
+lda_ac <- predict(lda_fit, new_data = titanic_train, type = "class") %>%
+  bind_cols(select(titanic_train, survived)) %>%
+  accuracy(truth = survived, estimate = .pred_class) %>%
+  select(.estimate) %>%
+  unlist()
+
+qda_ac <- predict(qda_fit, new_data = titanic_train, type = "class") %>%
+  bind_cols(select(titanic_train, survived)) %>%
+  accuracy(truth = survived, estimate = .pred_class) %>%
+  select(.estimate) %>%
+  unlist()
+
+nb_ac <- predict(nb_fit, new_data = titanic_train, type = "class") %>%
+  bind_cols(select(titanic_train, survived)) %>%
+  accuracy(truth = survived, estimate = .pred_class) %>%
+  select(.estimate) %>%
+  unlist()
+
+
+tibble(Model = c("Logistic Regression", "LDA", "QDA", "Naive Bayes"), Accuracy = c(log_ac, lda_ac, qda_ac, nb_ac)) 
+```
+
+#### QDA has highest accuracy.
+
+### Q10. Fit the model with the highest training accuracy to the testing data
+```{r, warning=FALSE}
+predict(qda_fit, new_data = titanic_test, type = "class") %>%
+  bind_cols(titanic_test %>% select(survived)) %>%
+  accuracy(truth = survived, estimate = .pred_class) # accuarcy of QDA model fitted to testing data
+
+qda_results <- augment(qda_fit, new_data = titanic_test)
+
+qda_results %>%
+  conf_mat(truth = survived, estimate = .pred_class) 
+
+qda_results %>%
+  roc_curve(survived, .pred_Yes) %>%
+  autoplot()
+
+qda_results %>%
+  roc_auc(survived, .pred_Yes)
+```
+
+The testing accuracy 0.8268156 is greater than the training accuracy 0.8174157. The difference is quite small, but if it were larger, it would show underfitting of the model. On the plus side, this model prevents overfitting.
+The AUC=0.8201581 is somewhat close to one and indicates a moderate to strong ability for the QDA model to distinguish between classes of $survived$.
